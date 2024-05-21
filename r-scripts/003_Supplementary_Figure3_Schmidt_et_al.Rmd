@@ -1,0 +1,732 @@
+---
+title: "Schmidt et al. - Supplementary Figure 3"
+author: "Anne Hoffrichter"
+date: "2024/03/21"
+output: 
+  bookdown::html_document2:
+    code_folding: hide
+    fig_caption: true
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: yes
+link-citations: yes
+---
+
+```{r loadLibraries, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(DESeq2)
+library(patchwork)
+library(AnnotationDbi)
+library(org.Hs.eg.db)
+library(clusterProfiler)
+library(GO.db)
+library(reshape2)
+# library(openxlsx)
+```
+
+# Functions
+
+```{r}
+my_sigGenes <- function(res, sigGeneCutOff = 0.05){
+  ens.str <- substr(rownames(res), 1, 15)
+  res$ENTREZ <- mapIds(org.Hs.eg.db,
+                     keys=ens.str,
+                     column="ENTREZID",
+                     keytype="ENSEMBL",
+                     multiVals="first")  
+  # find all significant genes
+  sigGenes <- res %>% as.data.frame() %>% 
+    filter(padj <= sigGeneCutOff) %>% 
+    pull("ENTREZ") %>% 
+    na.exclude()
+  #sigGenes <- na.exclude(sigGenes)
+  sigGenes
+}
+```
+
+```{r}
+my_GO <- function(res, sigGenes = sigGenes, ont=NULL, TOI=NULL){
+  kk <- enrichGO(gene = sigGenes, ont=ont, OrgDb = "org.Hs.eg.db")
+  if(is.null(kk)){
+    print(paste0("No enriched GO terms for ", ont))
+    }else{
+      GO <- kk2foldchange(kk)
+    }
+  if(!is.null(TOI)){
+    filter(GO, Description %in% TOI) 
+  }
+  return(list(GO))
+}
+```
+
+```{r}
+GO_all_ont <- function(.res, comparison, .sigGenes=sigGenes, TOI){
+  p1 <- my_GO(.res,sigGenes, ont = "BP", TOI=TOI)
+  p2 <- my_GO(.res, sigGenes, ont = "MF", TOI=TOI)
+  p3 <- my_GO(.res, sigGenes, ont = "CC", TOI=TOI)
+  list(p1,p2,p3)
+}
+```
+
+```{r}
+kk2foldchange <- function(kk){
+  GO <- as.data.frame(kk@result)
+  GeneRatio <- strsplit(GO$GeneRatio,"/")
+  GRdf <- data.frame()
+  for (i in seq_along(GeneRatio)){
+    GRdf[i,1] <- GeneRatio[[i]][1]
+    GRdf[i,2] <- GeneRatio[[i]][2]
+  }
+  GRdf$V1 <- as.numeric(GRdf$V1)
+  GRdf$V2 <- as.numeric(GRdf$V2)
+  GO$GeneRatio2 <- GRdf$V1/GRdf$V2
+  BgRatio <- strsplit(GO$BgRatio,"/")
+  BgRdf <- data.frame()
+  for (i in seq_along(BgRatio)){
+    BgRdf[i,1] <- BgRatio[[i]][1]
+    BgRdf[i,2] <- BgRatio[[i]][2]
+  }
+  BgRdf$V1 <- as.numeric(BgRdf$V1)
+  BgRdf$V2 <- as.numeric(BgRdf$V2)
+  GO$BgRatio2 <- BgRdf$V1/BgRdf$V2
+  GO$foldchange <- GO$GeneRatio2/GO$BgRatio2
+  return(GO)
+}
+```
+
+```{r}
+GO_genes <- function(GO_term){
+  go_id = GOID(GOTERM[Term(GOTERM) == GO_term])
+    allegs <- get(go_id, org.Hs.egGO2ALLEGS)
+    genes <- unlist(mget(allegs, org.Hs.egSYMBOL))
+    genes <- unique(genes)
+    genes
+}
+```
+
+```{r}
+my_GO_dat_bulk <- function (terms, genes) 
+{
+    colnames(terms) <- tolower(colnames(terms))
+    terms$genes <- toupper(terms$genes)
+    genes$ID <- toupper(genes$ID)
+    tgenes <- strsplit(as.vector(terms$genes), ", ")
+    if (length(tgenes[[1]]) == 1) 
+        tgenes <- strsplit(as.vector(terms$genes), ",")
+    count <- sapply(1:length(tgenes), function(x) length(tgenes[[x]]))
+    logFC <- sapply(unlist(tgenes), function(x) genes$log2FoldChange[match(x, 
+        genes$ID)])
+    if (class(logFC) == "factor") {
+        logFC <- gsub(",", ".", gsub("\\.", "", logFC))
+        logFC <- as.numeric(logFC)
+    }
+    s <- 1
+    zsc <- c()
+    for (c in 1:length(count)) {
+        value <- 0
+        e <- s + count[c] - 1
+        value <- sapply(logFC[s:e], function(x) ifelse(x > 0, 
+            1, -1))
+        value <- na.omit(value)
+        zsc <- c(zsc, sum(value)/sqrt(count[c]))
+        s <- e + 1
+    }
+    if (is.null(terms$id)) {
+        df <- data.frame(category = rep(as.character(terms$category), 
+            count), term = rep(as.character(terms$description), count), 
+            count = rep(count, count), genes = as.character(unlist(tgenes)), 
+            logFC = logFC, adj_pval = rep(terms$p.adjust, count), 
+            zscore = rep(zsc, count), stringsAsFactors = FALSE)
+    }
+    else {
+        df <- data.frame(category = rep(as.character(terms$category), 
+            count), ID = rep(as.character(terms$id), count), 
+            term = rep(as.character(terms$description), count), count = rep(count, 
+                count), genes = as.character(unlist(tgenes)), 
+            logFC = logFC, adj_pval = rep(terms$p.adjust, count), 
+            zscore = rep(zsc, count), stringsAsFactors = FALSE)
+    }
+    return(df)
+}
+```
+
+
+```{r}
+ncounts_GO <- function(dds, genes){
+  ncounts1 <- dds[dds@rowRanges@elementMetadata@listData[["gene_symbol"]] %in% genes]
+  ncounts <- counts(ncounts1, normalize=T)
+  rownames(ncounts) <- ncounts1@rowRanges@elementMetadata@listData[["gene_symbol"]]
+  colnames(ncounts) <- c(rep("Ctrl", times=8), rep("3d", times=8), rep("1d", times=7))
+  ncounts <- ncounts[match(genes, rownames(ncounts)),]
+  ncounts <- na.omit(ncounts)
+  return(ncounts)
+}
+```
+
+```{r}
+significance_of_GO_genes <- function(genes, res_d1, res_d3){
+  df <- data.frame(genes=genes)
+  for(i in seq_along(genes)){
+    temp <- filter(res_d1, gene_symbol==genes[i])
+      if(is.null(temp$padj)){
+          df$d1[i] <- "NA"
+      } else if(length(temp$padj)==0){
+          df$d1[i] <- "ns"
+      } else if(temp$padj<=0.001){
+          df$d1[i] <- "***"
+      } else if(temp$padj<=0.01){
+          df$d1[i] <- "**"
+      } else if(temp$padj<=0.05){
+          df$d1[i] <- "*"
+      } else {
+          df$d1[i] <- "ns"
+      }
+  }
+
+  for(i in seq_along(genes)){
+    temp <- filter(res_d3, gene_symbol==genes[i])
+      if(is.null(temp$padj)){
+          df$d3[i] <- "NA"
+      } else if(length(temp$padj)==0){
+          df$d3[i] <- "ns"
+      } else if(temp$padj<=0.001){
+        df$d3[i] <- "***"
+    } else if(temp$padj<=0.01){
+        df$d3[i] <- "**"
+    } else if(temp$padj<=0.05){
+        df$d3[i] <- "*"
+    } else {
+        df$d3[i] <- "ns"
+    }
+  }
+  return(df)
+}
+```
+
+```{r}
+my_zscale <- function(x){
+  M <- rowMeans(x, na.rm = TRUE)
+  nsamples <- ncol(x)
+  DF <- nsamples - 1L
+  IsNA <- is.na(x)
+  if (any(IsNA)) {
+    mode(IsNA) <- "integer"
+    DF <- DF - rowSums(IsNA)
+    DF[DF == 0L] <- 1L
+  }
+  x <- x - M
+  V <- rowSums(x^2L, na.rm = TRUE)/DF
+  x <- x/sqrt(V + 0.01)
+  out <- melt(x)
+  out
+}
+```
+
+
+```{r}
+GO_smooth_line_plot <- function(TPM, genes){
+  mat <- TPM[,!names(TPM)%in% c("gene_name")]
+  gene_symbol <-rownames(mat)
+  names(gene_symbol) <-  TPM$gene_name
+  df <- t(mat[gene_symbol[genes], ]) 
+  colnames(df) <- c(genes)
+  df <- as.data.frame(df)
+  all_na <- function(x) any(!is.na(x))
+  df <- df %>% select_if(all_na)
+  rowm <- rowMeans(df)
+  names(rowm) <- c(rep("Ctrl", times=8), rep("3d", times=8), rep("1d", times=7))
+  rowm <- as.data.frame(rowm)
+  rowm$group <- c(rep("Ctrl", times=8), rep("3d", times=8), rep("1d", times=7))
+  p <- mutate(rowm, group=factor(group,ordered=T, c("Ctrl", "1d", "3d")))
+  y <- aggregate(p[, 1], list(p$group), mean)
+  se <- aggregate(p[, 1], list(p$group), sd)
+
+  df <- data.frame(group=ordered(c("Ctrl", "1d", "3d"), levels=c("Ctrl", "1d", "3d")), TPM=y$x, se=se$x)
+  print(
+    ggplot(NULL,  aes(x= as.numeric(group)))+ 
+      geom_smooth(data=df, aes(as.numeric(group), TPM, ymin = TPM - se, ymax = TPM + se), stat="identity", col="red")+
+      scale_x_discrete(limits=c("Ctrl", "1d Psi", "3d Psi")) +
+      scale_y_log10()+ 
+      theme_classic(base_size = 24)+
+      theme(legend.title=element_blank(), axis.title.x = element_blank(), axis.text = element_text(size=30), axis.title.y = element_text(size=30))+
+      ylab("TPM")+
+      coord_cartesian(xlim = c(1,3.2), expand = FALSE)
+  )
+}
+```
+
+# A - Heatmap cognition
+
+```{r}
+GOs <- c("learning or memory", "cognition")
+```
+
+```{r}
+dds <- readRDS("../data/001_dds.rds")
+dds <- dds[,c(1:16, 24:30)]
+dds$Condition_simple <- droplevels(dds$Condition_simple)
+```
+
+```{r, fig.asp=6,fig.width=6}
+res_d1 <- results(dds, contrast = c("Condition_simple", "Trt5", "Ctrl"), alpha = 0.05)
+res_d1$gene_symbol <- mcols(dds)$gene_symbol
+res_d1 <- as.data.frame(res_d1) %>% filter(padj<=0.05)
+res_d3 <- results(dds, contrast = c("Condition_simple", "Trt3", "Ctrl"), alpha = 0.05)
+res_d3$gene_symbol <- mcols(dds)$gene_symbol
+res_d3 <- as.data.frame(res_d3) %>% filter(padj<=0.05)
+
+sig_genes <- unique(res_d1$gene_symbol, res_d3$gene_symbol)
+```
+
+```{r, fig.asp=4.3,fig.width=6}
+genes <- GO_genes("cognition")
+genes_learn <- GO_genes("learning or memory")
+genes <- genes[genes%in%sig_genes]
+ncounts <- ncounts_GO(dds, genes)
+
+df <- significance_of_GO_genes(genes, res_d1, res_d3)
+```
+
+```{r}
+Ctrl <- rowMeans(ncounts[,1:8])
+d3 <- rowMeans(ncounts[,9:16])
+d1 <- rowMeans(ncounts[,17:23])
+av_ncounts <- cbind(Ctrl, d1,d3)
+zcounts <- my_zscale(av_ncounts)
+lims <- c(min(zcounts$value), max(zcounts$value)) %>% abs()%>% max()
+levels <- filter(zcounts[order(zcounts$value),], Var2=="Ctrl")$Var1
+
+df_cognition <- data.frame(Var1=genes, Var2="Cognition", value=genes%in%genes)
+df_learn <- data.frame(Var1=genes, Var2="Learning or memory", value=genes%in%genes_learn)
+df_GO_genes <- rbind(df_cognition, df_learn)
+```
+
+```{r, fig.asp=3.8, fig.width=4}
+a <- ggplot(data = zcounts, aes(x=Var2, y=Var1, fill=value)) +
+    geom_tile()+
+    scale_fill_viridis_c(option="viridis", limits = c(-lims,lims))+
+    scale_y_discrete(limits = rev(levels), position = "right")+
+    scale_x_discrete(labels=c("Ctrl", "1d Psi", "3d Psi"))+
+    theme_minimal(base_size=12)+
+    labs(fill="Z-Score", x="", y="")+
+    theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=1, color="black"), 
+          axis.text.y = element_text(face = "italic",size=8, color="black"),
+          legend.position="left", 
+          legend.key.width = unit(0.8,"cm"),
+          plot.title = element_text(size=10,hjust = 0.5),
+          panel.grid = element_blank())+
+  annotate("text",
+               size=2, 
+               x=rep(c(2,3), each=length(genes)),
+               y=c(df$genes, df$genes), 
+               label=paste(c(df$d1, df$d3))
+           )
+
+b <- ggplot(data = df_GO_genes, aes(x=Var2, y=Var1, fill=value)) +
+    geom_tile()+
+    scale_y_discrete(limits = rev(levels), position = "right")+
+    scale_fill_discrete(labels=c("Not present", "Present"))+
+    theme_minimal(base_size=12)+
+    labs(fill="", x="", y="")+
+    theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=1, color="black"), 
+          axis.text.y = element_blank(), 
+          legend.position="left", 
+          legend.key.width = unit(0.8,"cm"),
+          panel.grid = element_blank())
+
+b+plot_spacer()+a+
+  plot_layout(guides = "collect",
+              widths = c(1.5,-2.2,4))
+```
+
+# B - GO sig. genes plot
+## Ctrl vs. 1d Psi
+
+```{r}
+dds <- readRDS("../data/001_dds.rds")
+```
+
+```{r}
+res <- results(dds, contrast = c("Condition_simple", "Trt5", "Ctrl"), alpha = 0.05)
+res$gene_symbol <- mcols(dds)$gene_symbol
+```
+
+```{r}
+sigGenes <- my_sigGenes(res)
+```
+
+```{r}
+TOI <- c("learning or memory", "cognition")
+```
+
+
+```{r, fig.asp=1.5}
+l <- GO_all_ont(res, comparison = "Ctrl vs. 1d Psi", TOI=TOI)
+```
+
+```{r}
+sig_genes <- as.data.frame(res) %>% filter(padj<0.05 & ! is.na(padj))
+colnames(sig_genes)[7] <- "ID"
+```
+
+```{r}
+GO <- bind_rows(BP=l[[1]][[1]], MF=l[[2]][[1]], CC=l[[3]][[1]], .id="Category")
+GO <- filter(GO, Description %in% TOI)
+GO$Genes <- map(GO$Description, GO_genes)
+GO$Genes <- map(GO$Genes, ~paste(.x, collapse=", "))
+GO$Genes <- unlist(GO$Genes)
+```
+
+```{r}
+GO_dat <- my_GO_dat_bulk(GO, sig_genes)
+```
+
+```{r}
+GO_dat2 <- filter(GO_dat, !is.na(logFC))
+t <- table(GO_dat2$term)
+for(i in seq_along(GO_dat2$term)){
+    GO_dat2$count[i] <- t[match(GO_dat2$term[i], names(t))]
+}
+
+```
+
+```{r}
+GO_dat3 <- filter(GO_dat2, term %in% TOI)
+GO_dat3$updown <- ifelse(GO_dat3$logFC<0, "downregulated", "upregulated")
+GO_dat3$Comparison <- "Ctrl vs. 1d Psi"
+GO_dat3_1 <- GO_dat3
+```
+
+```{r}
+a <- 
+  ggplot(GO_dat3, aes(x=ID, y=logFC, color=updown))+
+  geom_jitter(width=0.2)+
+  geom_vline(xintercept=c(1.5))+
+  geom_hline(yintercept=0, linetype="dashed")+
+  theme_classic()+
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank(), 
+        legend.title = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        legend.text=element_text(size=6), 
+        axis.title.y = element_text(margin = margin(r = 0, unit = "pt"), size=16),
+        axis.text.y = element_text(size=14, color="black"))+
+  scale_fill_discrete(labels=c("downregulated", "upregulated"))
+```
+
+```{r}
+bars <- GO_dat3[!duplicated(GO_dat3$term), ]
+b <- ggplot(bars, aes(x=ID, y=zscore))+
+  geom_col(aes(fill=zscore))+
+  scale_fill_gradient(low = "white", high = "#00BFC4", limits=c(0, 3))+
+  theme_void()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 14), 
+        axis.title.x = element_blank(),
+        legend.title = element_text( size=14), 
+        legend.text=element_text(size=10))
+```
+
+```{r}
+bars <- bars[order(bars$ID),]
+c <- gridExtra::tableGrob(bars[, c("ID", "term")], rows=NULL,theme=gridExtra::ttheme_default(base_size=14))
+```
+
+```{r, fig.asp=0.61, fig.width=8.8}
+FigB1 <- wrap_elements(a+c+b+guide_area()+ 
+                           plot_layout(guides="collect", heights = c(2,1))+
+                           plot_annotation(title="Ctrl vs. 1d Psi")& 
+                           guides(colour = guide_legend(override.aes = list(size=4))) &
+                           theme(legend.position = "right", legend.direction="horizontal",
+                                 legend.text = element_text(size=14),
+                                 legend.key.size = unit(20, "pt"),
+                                 legend.box.margin = margin(t = 1, unit = "in"),
+                                 plot.title = element_text(size=15)))
+```
+
+## Ctrl vs. 3d Psi
+
+```{r}
+res <- results(dds, contrast = c("Condition_simple", "Trt3", "Ctrl"), alpha = 0.05)
+res$gene_symbol <- mcols(dds)$gene_symbol
+```
+
+```{r}
+sigGenes <- my_sigGenes(res)
+```
+
+```{r, fig.asp=1.5}
+l <- GO_all_ont(res, comparison = "Ctrl vs. 3d Psi", TOI=TOI)
+```
+
+```{r}
+TOI <- c("learning or memory", "cognition")
+```
+
+```{r}
+sig_genes <- as.data.frame(res) %>% filter(padj<0.05 & ! is.na(padj))
+colnames(sig_genes)[7] <- "ID"
+```
+
+```{r}
+GO <- bind_rows(BP=l[[1]][[1]], MF=l[[2]][[1]], CC=l[[3]][[1]], .id="Category")
+GO <- filter(GO, Description %in% TOI)
+GO$Genes <- map(GO$Description, GO_genes)
+GO$Genes <- map(GO$Genes, ~paste(.x, collapse=", "))
+GO$Genes <- unlist(GO$Genes)
+```
+
+```{r}
+GO_dat <- my_GO_dat_bulk(GO, sig_genes)
+```
+
+```{r}
+GO_dat2 <- filter(GO_dat, !is.na(logFC))
+t <- table(GO_dat2$term)
+for(i in seq_along(GO_dat2$term)){
+    GO_dat2$count[i] <- t[match(GO_dat2$term[i], names(t))]
+}
+
+```
+
+```{r}
+GO_dat3 <- filter(GO_dat2, term %in% TOI)
+GO_dat3$updown <- ifelse(GO_dat3$logFC<0, "downregulated", "upregulated")
+GO_dat3$Comparison <- "Ctrl vs. 3d Psi"
+GO_dat3_2 <- GO_dat3
+```
+
+```{r}
+a <- 
+  ggplot(GO_dat3, aes(x=ID, y=logFC, color=updown))+
+  geom_jitter(width=0.2)+
+  geom_vline(xintercept=c(1.5))+
+  geom_hline(yintercept=0, linetype="dashed")+
+  theme_classic()+
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank(), 
+        legend.title = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        legend.text=element_text(size=6), 
+        axis.title.y = element_text(margin = margin(r = 0, unit = "pt"), size=16),
+        axis.text.y = element_text(size=14, color="black"))+
+  scale_fill_discrete(labels=c("downregulated", "upregulated"))
+```
+
+```{r}
+bars <- GO_dat3[!duplicated(GO_dat3$term), ]
+b <- ggplot(bars, aes(x=ID, y=zscore))+
+  geom_col(aes(fill=zscore))+
+  scale_fill_gradient(low = "white", high = "#00BFC4", limits=c(0, 3))+
+  theme_void()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 14), 
+        axis.title.x = element_blank(),
+        legend.title = element_text( size=14), 
+        legend.text=element_text(size=10))
+```
+
+```{r}
+bars <- bars[order(bars$ID),]
+c <- gridExtra::tableGrob(bars[, c("ID", "term")], rows=NULL,theme=gridExtra::ttheme_default(base_size=14))
+```
+
+```{r, fig.asp=0.61, fig.width=8.8}
+FigB2 <- wrap_elements(a+c+b+guide_area()+ 
+                           plot_layout(guides="collect", heights = c(2,1))+
+                           plot_annotation(title="Ctrl vs. 3d Psi")& 
+                           guides(colour = guide_legend(override.aes = list(size=4))) &
+                           theme(legend.position = "right", legend.direction="horizontal",
+                                 legend.text = element_text(size=14),
+                                 legend.key.size = unit(20, "pt"),
+                                 legend.box.margin = margin(t = 1, unit = "in"),
+                                 plot.title = element_text(size=15)))
+```
+
+## 1d Psi vs. 3d Psi
+
+```{r}
+res <- results(dds, contrast = c("Condition_simple", "Trt3", "Trt5"), alpha = 0.05)
+res$gene_symbol <- mcols(dds)$gene_symbol
+```
+
+```{r}
+sigGenes <- my_sigGenes(res)
+```
+
+
+```{r, fig.asp=1.5}
+l <- GO_all_ont(res, comparison = "1d Psi vs. 3d Psi", TOI=TOI)
+```
+
+```{r}
+TOI <- c("learning or memory", "cognition")
+```
+
+```{r}
+sig_genes <- as.data.frame(res) %>% filter(padj<0.05 & ! is.na(padj))
+colnames(sig_genes)[7] <- "ID"
+```
+
+```{r}
+GO <- bind_rows(BP=l[[1]][[1]], MF=l[[2]][[1]], CC=l[[3]][[1]], .id="Category")
+GO <- filter(GO, Description %in% TOI)
+GO$Genes <- map(GO$Description, GO_genes)
+GO$Genes <- map(GO$Genes, ~paste(.x, collapse=", "))
+GO$Genes <- unlist(GO$Genes)
+```
+
+```{r}
+GO_dat <- my_GO_dat_bulk(GO, sig_genes)
+```
+
+```{r}
+GO_dat2 <- filter(GO_dat, !is.na(logFC))
+t <- table(GO_dat2$term)
+for(i in seq_along(GO_dat2$term)){
+    GO_dat2$count[i] <- t[match(GO_dat2$term[i], names(t))]
+}
+
+```
+
+```{r}
+GO_dat3 <- filter(GO_dat2, term %in% TOI)
+GO_dat3$updown <- ifelse(GO_dat3$logFC<0, "downregulated", "upregulated")
+GO_dat3$Comparison <- "1d Psi vs. 3d Psi"
+GO_dat3_3 <- GO_dat3
+```
+
+```{r}
+a <- 
+  ggplot(GO_dat3, aes(x=ID, y=logFC, color=updown))+
+  geom_jitter(width=0.2)+
+  geom_vline(xintercept=c(1.5))+
+  geom_hline(yintercept=0, linetype="dashed")+
+  theme_classic()+
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank(), 
+        legend.title = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        legend.text=element_text(size=6), 
+        axis.title.y = element_text(margin = margin(r = 0, unit = "pt"), size=16),
+        axis.text.y = element_text(size=14, color="black"))+
+  scale_fill_discrete(labels=c("downregulated", "upregulated"))
+```
+
+```{r}
+bars <- GO_dat3[!duplicated(GO_dat3$term), ]
+b <- ggplot(bars, aes(x=ID, y=zscore))+
+  geom_col(aes(fill=zscore))+
+  scale_fill_gradient(low = "white", high = "#00BFC4", limits=c(0, 3))+
+  theme_void()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 14), 
+        axis.title.x = element_blank(),
+        legend.title = element_text( size=14), 
+        legend.text=element_text(size=10))
+```
+
+```{r}
+bars <- bars[order(bars$ID),]
+c <- gridExtra::tableGrob(bars[, c("ID", "term")], rows=NULL,theme=gridExtra::ttheme_default(base_size=14))
+```
+
+```{r, fig.asp=0.61, fig.width=8.8}
+FigB3 <- wrap_elements(a+c+b+guide_area()+ 
+                           plot_layout(guides="collect", heights = c(2,1))+
+                           plot_annotation(title="1d Psi vs. 3d Psi")& 
+                           guides(colour = guide_legend(override.aes = list(size=4))) &
+                           theme(legend.position = "right", legend.direction="horizontal",
+                                 legend.text = element_text(size=14),
+                                 legend.key.size = unit(20, "pt"),
+                                 legend.box.margin = margin(t = 1, unit = "in"),
+                                 plot.title = element_text(size=15)))
+```
+
+```{r}
+GO_dat <- rbind(GO_dat3_1, GO_dat3_2) %>% rbind(GO_dat3_3)
+GO_dat$Comparison <- factor(GO_dat$Comparison, levels = c("Ctrl vs. 1d Psi", "Ctrl vs. 3d Psi", "1d Psi vs. 3d Psi"))
+```
+
+
+
+```{r}
+a <- 
+  ggplot(GO_dat, aes(x=ID, y=logFC, color=updown))+
+  facet_grid(~Comparison)+
+  geom_jitter(width=0.2)+
+  geom_vline(xintercept=c(0.41,1.5,2.59), linewidth=0.7)+
+  geom_hline(yintercept=0, linetype="dashed")+
+  theme_classic()+
+  theme(axis.text.x = element_blank(), 
+        axis.title.x = element_blank(), 
+        legend.title = element_blank(), 
+        axis.ticks.x = element_blank(), 
+        legend.text=element_text(size=6), 
+        axis.title.y = element_text(margin = margin(r = 0, unit = "pt"), size=16),
+        axis.text.y = element_text(size=14, color="black"),
+        strip.text.x = element_text(size=14))+
+  scale_fill_discrete(labels=c("downregulated", "upregulated"))
+```
+
+```{r}
+bars <- rbind(GO_dat3_1[!duplicated(GO_dat3_1$term), ],GO_dat3_2[!duplicated(GO_dat3_2$term), ]) %>% rbind(GO_dat3_3[!duplicated(GO_dat3_3$term), ])
+bars$Comparison <- factor(bars$Comparison, levels = c("Ctrl vs. 1d Psi", "Ctrl vs. 3d Psi", "1d Psi vs. 3d Psi"))
+b <- ggplot(bars, aes(x=ID, y=zscore))+
+  facet_grid(~Comparison)+
+  geom_col(aes(fill=zscore))+
+  scale_fill_gradient(low = "white", high = "#00BFC4", limits=c(0, 3))+
+  theme_void()+
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1, size = 14), 
+        axis.title.x = element_blank(),
+        legend.title = element_text( size=14), 
+        legend.text=element_text(size=10),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+```
+
+```{r}
+bars <- bars[order(bars$ID),]
+c <- gridExtra::tableGrob(bars[, c("ID", "term")], rows=NULL,theme=gridExtra::ttheme_default(base_size=14))
+```
+
+```{r, fig.asp=1, fig.width=6, dev="pdf"}
+(FigB3 <- wrap_elements(a+b+c+guide_area()+ 
+                           plot_layout(guides="collect", ncol=1, heights=c(2,1,1,1))& 
+                           guides(colour = guide_legend(override.aes = list(size=4))) &
+                           theme(legend.position = "right", legend.direction="horizontal",
+                                 legend.text = element_text(size=14),
+                                 legend.key.size = unit(20, "pt"),
+                                 legend.box.margin = margin(t = 1, unit = "in"),
+                                 plot.title = element_text(size=15))))
+```
+
+# C - smooth line plots
+
+```{r}
+TPM <- readRDS("../data/001_TPM.rds")
+TPM <- TPM[,c(1:16, 24:30,44)]
+```
+
+```{r}
+GOs <- c("learning or memory", "cognition")
+```
+
+```{r, include=FALSE}
+plots <- list()
+for(i in seq_along(GOs)){
+  genes <- GO_genes(GOs[i])
+  plots[[i]] <- GO_smooth_line_plot(TPM, genes)+
+  ggtitle(GOs[i])
+}
+```
+
+```{r, fig.width=6, fig.asp=1.2, dev="svg"}
+plots[[1]]/plots[[2]] &
+  theme(axis.text = element_text(color="black"))
+```
+
+
+
+```{r}
+sessionInfo()
+```
+

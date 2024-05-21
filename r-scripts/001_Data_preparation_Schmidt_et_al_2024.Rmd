@@ -1,0 +1,100 @@
+---
+title: "Schmidt et al. - Data preparation"
+author: "Anne Hoffrichter"
+date: "2024/05/16"
+output: 
+  bookdown::html_document2:
+    code_folding: hide
+    fig_caption: true
+    toc: yes
+    toc_depth: 4
+    toc_float:
+      collapsed: yes
+link-citations: yes
+---
+
+```{r loadLibraries, message=FALSE, warning=FALSE}
+library(DESeq2)
+library(openxlsx)
+suppressPackageStartupMessages(library(tidyverse))
+set.seed(42)
+```
+
+# Load data
+
+```{r loadData, message=FALSE, warning=FALSE}
+tbl <- list.files(path = "../raw_data/IlseID29538/featureCounts/", pattern = "*.tsv", full.names = T)
+l <- list()
+for (i in c(1:length(tbl))){
+  l[[i]] <- read.table(tbl[i], header=T, comment.char = "")
+  l[[i]] <- l[[i]][,c(4,9)]
+}
+counts <- Reduce(function(x,y)merge(x,y, by="gene_id", sort=F), l)
+colnames(counts) <- c("gene_id", gsub("../raw_data/IlseID29538/featureCounts//|_OE0533_MS_69_2.fpkm_tpm.featureCounts.tsv|_OE0533_MS_68_3.fpkm_tpm.featureCounts.tsv", "", tbl))
+
+rownames(counts) <- counts$gene_id
+counts <- counts[,-1]
+tname <- read.table(tbl[1], header = T, comment.char = "")
+name <- tname[, 7]
+name <- as.vector(name)
+gene_symbol <- name
+```
+
+```{r}
+sample_info <- read.xlsx("../raw_data/IlseID29538/IlseID29538_metadata.xlsx")
+rownames(sample_info) <- sample_info$ODCF_name
+sample_info <- sample_info[match(colnames(counts),rownames(sample_info)),]
+```
+
+```{r}
+rm(l, tbl, i, tname, name)
+```
+
+# DESeq2 Analysis
+
+```{r}
+sample_info$Batch <- as.factor(sample_info$Batch)
+DESeq.ds <- DESeqDataSetFromMatrix(countData = counts, colData = sample_info, design = ~Batch+ Cell_line + Condition_simple)
+featureData <- data.frame(gene_symbol=gene_symbol)
+mcols(DESeq.ds) <- DataFrame(mcols(DESeq.ds), featureData)
+```
+
+```{r}
+names(gene_symbol) <- rownames(counts)
+```
+
+```{r}
+# removing genes without any counts
+DESeq.ds <- DESeq.ds[rowSums(counts(DESeq.ds))>0,]
+```
+
+```{r}
+dds <- DESeq(DESeq.ds)
+```
+
+```{r}
+saveRDS(dds, "../data/001_dds.rds")
+```
+
+# TPM R object
+
+```{r}
+tbl <- list.files(path = "../raw_data/IlseID29538/featureCounts/", pattern = "*.tsv", full.names = T)
+l <- list()
+for (i in c(1:length(tbl))){
+  l[[i]] <- read.table(tbl[i], header=T, comment.char = "")
+  l[[i]] <- l[[i]][,c(4,9)]
+}
+# TPM counts
+TPM <- map(tbl, read.table, header=T, comment.char="") %>% map(15)
+names(TPM) <- c(gsub("../raw_data/IlseID29538/featureCounts//|_OE0533_MS_69_2.fpkm_tpm.featureCounts.tsv|_OE0533_MS_68_3.fpkm_tpm.featureCounts.tsv", "", tbl))
+TPM <- TPM %>% as.data.frame()
+rownames(TPM) <- read.table(tbl[1], header = T, comment.char = "")[,4] %>% substr(1,15)
+TPM$gene_name <- read.table(tbl[1], header = T, comment.char = "")$name
+saveRDS(TPM, "../data/001_TPM.rds")
+```
+
+```{r}
+sessionInfo()
+```
+
